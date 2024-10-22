@@ -1,0 +1,358 @@
+diff --git a/ldpi/training/data.py b/ldpi/training/data.py
+index bcb4826..e19c91c 100644
+--- a/ldpi/training/data.py
++++ b/ldpi/training/data.py
+@@ -29,7 +29,7 @@ class CustomDataset(Dataset):
+         n_samples (int): Number of samples in the dataset.
+     """
+
+-    def __init__(self, samples: ArrayFloat, targets: ArrayInt, bin_targets: ArrayInt):
++    def __init__(self, samples: ArrayFloat, targets: ArrayInt, bin_targets: ArrayInt, str_labels : List[str], benign_label_range):
+         """
+         Initializes the CustomDataset with samples and targets.
+
+@@ -42,6 +42,8 @@ class CustomDataset(Dataset):
+         self.targets = targets
+         self.bin_targets = bin_targets
+         self.n_samples = samples.shape[0]
++        self.str_labels = str_labels
++        self.benign_label_range = benign_label_range
+
+     def __getitem__(self, index: int) -> Tuple[ArrayFloat, ArrayFloat, ArrayFloat]:
+         """
+@@ -182,14 +184,17 @@ def load_data_from_folder(dataset_name: str, category: str, counter: int) -> Tup
+     targets: List[ArrayInt] = []
+
+     parent_path = os.path.join('samples', dataset_name, 'pcap', category)
++    str_labels = []
+
+     # Loop through subdirectories
+     for traffic_type in os.listdir(parent_path):
+         traffic_path = os.path.join(parent_path, traffic_type)
+-
++
+         for sub_traffic_type in os.listdir(traffic_path):
+             sub_traffic_path = os.path.join(traffic_path, sub_traffic_type)
+             print(sub_traffic_path, counter)
++            str_labels.append(sub_traffic_type)
++
+
+             folder_data: Optional[ArrayFloat] = None
+             for file_name in os.listdir(sub_traffic_path):
+@@ -207,7 +212,7 @@ def load_data_from_folder(dataset_name: str, category: str, counter: int) -> Tup
+             targets.append(labels)
+             counter += 1
+
+-    return counter, samples, targets
++    return counter, samples, targets, str_labels
+
+
+ def load_data(dataset: str, test_size: float = 0.20, only_normal: bool = False) -> Tuple[ArrayFloat, ArrayInt, ArrayInt, ArrayFloat, ArrayInt, ArrayInt]:
+@@ -224,10 +229,11 @@ def load_data(dataset: str, test_size: float = 0.20, only_normal: bool = False)
+     """
+     # Assuming load_data_from_folder is a function that loads the data
+     # Replace with the actual data loading logic as necessary
+-    label_counter, benign_data, benign_labels = load_data_from_folder(dataset, 'benign', counter=0)
+-
++    label_counter, benign_data, benign_labels, str_labels_benign = load_data_from_folder(dataset, 'benign', counter=0)
++
++    str_labels_malicious = None
+     if not only_normal:
+-        label_counter, malware_data, malware_labels = load_data_from_folder(dataset, 'malicious', counter=label_counter)
++        label_counter, malware_data, malware_labels, str_labels_malicious = load_data_from_folder(dataset, 'malicious', counter=label_counter)
+         anomaly = np.concatenate(malware_data).astype(np.float32)
+         anomaly_targets = np.concatenate(malware_labels).astype(int)
+     else:
+@@ -261,7 +267,14 @@ def load_data(dataset: str, test_size: float = 0.20, only_normal: bool = False)
+     test_targets = np.array(test['target'].tolist()).astype(int)
+     test_bin_targets = np.array(test['bin_target'].tolist()).astype(int)
+
+-    return train_samples, train_targets, train_bin_targets, test_samples, test_targets, test_bin_targets
++    if str_labels_malicious is not None:
++        str_labels = str_labels_benign + str_labels_malicious
++    else:
++        str_labels = str_labels_benign
++
++    benign_label_range = np.arange(len(str_labels_benign))
++
++    return train_samples, train_targets, train_bin_targets, test_samples, test_targets, test_bin_targets, str_labels, benign_label_range
+
+
+ def get_training_dataloader(dataset: str, batch_size: int = 64) -> Tuple[DataLoaderType, DataLoaderType]:
+@@ -275,12 +288,12 @@ def get_training_dataloader(dataset: str, batch_size: int = 64) -> Tuple[DataLoa
+     Returns:
+         Tuple[DataLoaderType, DataLoaderType]: Training and testing data loaders.
+     """
+-    train_samples, train_targets, train_bin_targets, test_samples, test_targets, test_bin_targets = load_data(dataset, only_normal=False)
++    train_samples, train_targets, train_bin_targets, test_samples, test_targets, test_bin_targets, str_labels, benign_label_range = load_data(dataset, only_normal=False)
+     print(f'{train_samples.shape[0]} training samples')
+     print(train_samples.shape, test_samples.shape)
+
+-    train_ds = CustomDataset(train_samples, train_targets, train_bin_targets)
+-    test_ds = CustomDataset(test_samples, test_targets, test_bin_targets)
++    train_ds = CustomDataset(train_samples, train_targets, train_bin_targets, str_labels, benign_label_range)
++    test_ds = CustomDataset(test_samples, test_targets, test_bin_targets, str_labels, benign_label_range)
+
+     weights = make_weights_for_balanced_classes(train_bin_targets)
+     sampler = WeightedRandomSampler(torch.DoubleTensor(weights), len(weights))
+@@ -305,13 +318,13 @@ def get_pretrain_dataloader(dataset: str, batch_size: int, contrastive: bool = F
+     Returns:
+         DataLoaderType: Pretraining data loader.
+     """
+-    train_samples, train_targets, train_bin_targets, _, _, _ = load_data(dataset, test_size=0.0, only_normal=True)
++    train_samples, train_targets, train_bin_targets, _, _, _, str_labels, benign_label_range = load_data(dataset, test_size=0.0, only_normal=True)
+     print(f'Pretraining with {train_samples.shape[0]} normal samples')
+
+     if contrastive:
+         train_ds = OneClassContrastiveDataset(train_samples, train_targets, train_bin_targets)
+     else:
+-        train_ds = CustomDataset(train_samples, train_targets, train_bin_targets)
++        train_ds = CustomDataset(train_samples, train_targets, train_bin_targets, str_labels, benign_label_range)
+
+     pretrain_loader = DataLoader(dataset=train_ds, batch_size=batch_size, shuffle=shuffle, drop_last=drop_last, pin_memory=True)
+
+diff --git a/ldpi/training/output/ResCNN (copy)/best_model_with_center.pth b/ldpi/training/output/ResCNN (copy)/best_model_with_center.pth
+deleted file mode 100644
+index 7746cc7..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/best_model_with_center.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/plots/hundred_one.pdf b/ldpi/training/output/ResCNN (copy)/plots/hundred_one.pdf
+deleted file mode 100644
+index 0031e86..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/plots/hundred_one.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/plots/max.pdf b/ldpi/training/output/ResCNN (copy)/plots/max.pdf
+deleted file mode 100644
+index 5596cc1..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/plots/max.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/plots/near_max.pdf b/ldpi/training/output/ResCNN (copy)/plots/near_max.pdf
+deleted file mode 100644
+index d6f4a67..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/plots/near_max.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/plots/ninety_nine.pdf b/ldpi/training/output/ResCNN (copy)/plots/ninety_nine.pdf
+deleted file mode 100644
+index 263d639..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/plots/ninety_nine.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/pretrained_model.pth b/ldpi/training/output/ResCNN (copy)/pretrained_model.pth
+deleted file mode 100644
+index dcf9ac0..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/pretrained_model.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/scripted_quantized_model.pth b/ldpi/training/output/ResCNN (copy)/scripted_quantized_model.pth
+deleted file mode 100644
+index 4731222..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/scripted_quantized_model.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN (copy)/traced_model.pth b/ldpi/training/output/ResCNN (copy)/traced_model.pth
+deleted file mode 100644
+index a0ec5b1..0000000
+Binary files a/ldpi/training/output/ResCNN (copy)/traced_model.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/best_model_with_center.pth b/ldpi/training/output/ResCNN 100 original dataset/best_model_with_center.pth
+deleted file mode 100644
+index d025b71..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/best_model_with_center.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/plots/hundred_one.pdf b/ldpi/training/output/ResCNN 100 original dataset/plots/hundred_one.pdf
+deleted file mode 100644
+index 0ec635f..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/plots/hundred_one.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/plots/max.pdf b/ldpi/training/output/ResCNN 100 original dataset/plots/max.pdf
+deleted file mode 100644
+index 741c2c9..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/plots/max.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/plots/near_max.pdf b/ldpi/training/output/ResCNN 100 original dataset/plots/near_max.pdf
+deleted file mode 100644
+index d31fd26..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/plots/near_max.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/plots/ninety_nine.pdf b/ldpi/training/output/ResCNN 100 original dataset/plots/ninety_nine.pdf
+deleted file mode 100644
+index fafe442..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/plots/ninety_nine.pdf and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/pretrained_model.pth b/ldpi/training/output/ResCNN 100 original dataset/pretrained_model.pth
+deleted file mode 100644
+index dcf9ac0..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/pretrained_model.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/scripted_quantized_model.pth b/ldpi/training/output/ResCNN 100 original dataset/scripted_quantized_model.pth
+deleted file mode 100644
+index 21b1fcc..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/scripted_quantized_model.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN 100 original dataset/traced_model.pth b/ldpi/training/output/ResCNN 100 original dataset/traced_model.pth
+deleted file mode 100644
+index 02a5528..0000000
+Binary files a/ldpi/training/output/ResCNN 100 original dataset/traced_model.pth and /dev/null differ
+diff --git a/ldpi/training/output/ResCNN/best_model_with_center.pth b/ldpi/training/output/ResCNN/best_model_with_center.pth
+index a275186..f6dc67a 100644
+Binary files a/ldpi/training/output/ResCNN/best_model_with_center.pth and b/ldpi/training/output/ResCNN/best_model_with_center.pth differ
+diff --git a/ldpi/training/output/ResCNN/plots/hundred_one.pdf b/ldpi/training/output/ResCNN/plots/hundred_one.pdf
+index 162ac14..198df17 100644
+Binary files a/ldpi/training/output/ResCNN/plots/hundred_one.pdf and b/ldpi/training/output/ResCNN/plots/hundred_one.pdf differ
+diff --git a/ldpi/training/output/ResCNN/plots/max.pdf b/ldpi/training/output/ResCNN/plots/max.pdf
+index d671749..15bcd2e 100644
+Binary files a/ldpi/training/output/ResCNN/plots/max.pdf and b/ldpi/training/output/ResCNN/plots/max.pdf differ
+diff --git a/ldpi/training/output/ResCNN/plots/near_max.pdf b/ldpi/training/output/ResCNN/plots/near_max.pdf
+index 2b50360..6a0c429 100644
+Binary files a/ldpi/training/output/ResCNN/plots/near_max.pdf and b/ldpi/training/output/ResCNN/plots/near_max.pdf differ
+diff --git a/ldpi/training/output/ResCNN/plots/ninety_nine.pdf b/ldpi/training/output/ResCNN/plots/ninety_nine.pdf
+index 197d5de..33210d9 100644
+Binary files a/ldpi/training/output/ResCNN/plots/ninety_nine.pdf and b/ldpi/training/output/ResCNN/plots/ninety_nine.pdf differ
+diff --git a/ldpi/training/output/ResCNN/pretrained_model.pth b/ldpi/training/output/ResCNN/pretrained_model.pth
+index dcf9ac0..af81ffc 100644
+Binary files a/ldpi/training/output/ResCNN/pretrained_model.pth and b/ldpi/training/output/ResCNN/pretrained_model.pth differ
+diff --git a/ldpi/training/output/ResCNN/scripted_quantized_model.pth b/ldpi/training/output/ResCNN/scripted_quantized_model.pth
+index 96e2343..3d62e56 100644
+Binary files a/ldpi/training/output/ResCNN/scripted_quantized_model.pth and b/ldpi/training/output/ResCNN/scripted_quantized_model.pth differ
+diff --git a/ldpi/training/output/ResCNN/traced_model.pth b/ldpi/training/output/ResCNN/traced_model.pth
+index c969026..e7d55ae 100644
+Binary files a/ldpi/training/output/ResCNN/traced_model.pth and b/ldpi/training/output/ResCNN/traced_model.pth differ
+diff --git a/ldpi/training/training.py b/ldpi/training/training.py
+index cf4ee7c..e38f351 100644
+--- a/ldpi/training/training.py
++++ b/ldpi/training/training.py
+@@ -12,12 +12,14 @@ from torch.optim import SGD
+ from torch.optim.lr_scheduler import CosineAnnealingLR
+ from torch.utils.data import DataLoader
+ from tqdm import tqdm
++import pickle
+
+ import data
+ import plots
+ from losses import OneClassContrastiveLoss
+ from model import ResCNNContrastive
+ from options import LDPIOptions
++from sklearn.metrics import roc_auc_score, precision_recall_fscore_support
+
+
+ class ContrastivePretrainer:
+@@ -199,7 +201,7 @@ class Trainer:
+         loader = data.get_pretrain_dataloader(dataset='TII-SSRC-23', batch_size=self.args.batch_size, contrastive=False, shuffle=False, drop_last=False)
+         self._init_center_c(loader)
+
+-    def train(self, eta: float = 1.0, eps: float = 1e-10, per_validation: int = 5) -> NoReturn:
++    def train(self, eta: float = 1.0, eps: float = 1e-10, per_validation: int = 1) -> NoReturn:
+         """
+         Trains the model.
+
+@@ -259,8 +261,14 @@ class Trainer:
+         bin_labels_np = bin_labels.to('cpu').numpy()
+         mult_labels_np = mult_labels.to('cpu').numpy()
+
++        # Compute AUC on the whole datasets (whole normal vs. whole malicious)
+         auroc = plots.roc(scores_np, bin_labels_np, plot=False)
+         results = {'auc': auroc}
++
++        # Compute per class AUC (whole normal vs. subset of malicious where target label = malicious label)
++        str_labels = self.test_loader.dataset.str_labels
++        benign_label_range = self.test_loader.dataset.benign_label_range
++        multi_results = self.compute_multiclass_metrics(scores_np, bin_labels_np, mult_labels_np, str_labels, benign_label_range)
+
+         bool_abnormal = bin_labels_np.astype(bool)
+         bool_normal = ~bool_abnormal
+@@ -292,6 +300,35 @@ class Trainer:
+
+                 plots.plot_anomaly_score_dists(self.args.model_name, test_scores=plot_scores_np, labels=plot_bin_labels_np, name=name, threshold=threshold)
+
++        return results, multi_results
++
++    def compute_multiclass_metrics(self, scores_np, bin_labels_np, mult_labels_np, str_labels, benign_label_range):
++        results = {}
++        # Identify indices of normal samples
++        normal_indices = np.where(bin_labels_np == 0)[0]
++        normal_scores = scores_np[normal_indices]
++
++        # Get unique attack types from the multi-label array
++        unique_labels = np.unique(mult_labels_np)
++
++        # Calculate AUC-ROC for each type of attack compared to normal samples
++        for label in unique_labels:
++            if label in benign_label_range:
++                continue
++
++            # Indices for the current attack type
++            attack_indices = np.where(mult_labels_np == label)[0]
++            attack_scores = scores_np[attack_indices]
++
++            # Combine normal and attack scores
++            combined_scores = np.concatenate([normal_scores, attack_scores])
++            # Create binary labels array: 0 for normal, 1 for attack
++            combined_labels = np.concatenate([np.zeros(len(normal_scores)), np.ones(len(attack_scores))])
++
++            # Compute AUC-ROC
++            auc_score = roc_auc_score(combined_labels, combined_scores)
++            results[str_labels[label]] = auc_score
++
+         return results
+
+     def trace_and_measure_inference(self):
+@@ -498,9 +535,26 @@ class Trainer:
+         # Periodic testing
+         if (epoch + 1) % per_validation == 0 or epoch < self.warmup_epochs:
+             print("Validation for early stopping at epoch:", epoch + 1)
+-            results = self.test(plot=False)
+-            print(results)
+-
++            results, multi_results = self.test(plot=False)
++            epoch_results = {
++                'epoch': epoch + 1,
++                'whole': results,
++                'per_class': multi_results
++            }
++
++            # Load existing results if the file exists, else initialize an empty dictionary
++            if os.path.exists('validation_results.pkl'):
++                with open('validation_results.pkl', 'rb') as f:
++                    all_epochs_results = pickle.load(f)
++            else:
++                all_epochs_results = {}
++
++            # Add the current epoch's results
++            all_epochs_results[epoch + 1] = epoch_results
++
++            print(all_epochs_results[epoch + 1]['whole'])
++            print(all_epochs_results[epoch + 1]['per_class'])
++
+             max_dr = results['max']['rec']
+             separation_sccore = results['separation_score']
+             print('max', max_dr)
+@@ -514,6 +568,8 @@ class Trainer:
+
+                 # Save the current model as the best model
+                 self.best_model_state = self.model.state_dict().copy()
++                all_epochs_results['best_epoch'] = epoch + 1
++
+                 print("New best model found!")
+
+                 # Save best model
+@@ -530,6 +586,12 @@ class Trainer:
+                 self.continue_warmup = True
+             else:
+                 self.continue_warmup = False
++
++            # Save the updated results to the pickle file
++            with open('validation_results.pkl', 'wb') as f:
++                pickle.dump(all_epochs_results, f)
++
++
+
+     def _measure_inference_time(self, model: Module) -> Tuple[float, int]:
+         """
+@@ -573,8 +635,9 @@ def main() -> NoReturn:
+     trainer.train()
+
+     # Testing the trained model
+-    results = trainer.test(plot=True)
++    results, multi_cls = trainer.test(plot=True)
+     print("Test results:", results)
++    print("Per class results:", multi_cls)
+
+     # Tracing and measuring inference before and after model tracing
+     freq_pre_trace, freq_post_trace = trainer.trace_and_measure_inference()
+diff --git a/options.py b/options.py
+index 1db506e..de2f4f9 100644
+--- a/options.py
++++ b/options.py
+@@ -21,8 +21,8 @@ class SnifferOptions:
+     def __init__(self):
+         self.dataset_path: str = '../../datasets/TII-SSRC-23/pcap/'
+         self.delay: bool = False
+-        self.session: bool = False
+-        self.interface: str = 'br-lan'
++        self.session: bool = True
++        self.interface: str = 'wlp0s5f0'
+         self.timeout: int = 120
+         self.cleaning_cycle: int = 60
+         self.debug: bool = True
