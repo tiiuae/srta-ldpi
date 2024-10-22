@@ -5,6 +5,10 @@ from enum import Enum
 from typing import Tuple, Union, Optional, NoReturn
 
 import dpkt
+from systemd import journal
+import subprocess
+import socket
+import netifaces as ni
 
 # Define a type for the flow key
 FlowKeyType = Tuple[bytes, int, bytes, int]  # (src_ip, src_port, dst_ip, dst_port)
@@ -196,6 +200,30 @@ def flow_key_to_str(flow_key: tuple) -> tuple:
     value = (inet_to_str(flow_key[0]), flow_key[1], inet_to_str(flow_key[2]), flow_key[3], flow_key[4])
     return value
 
+def bytes_to_ip_address(ip_bytes: bytes) -> str:
+    """
+    Convert a bytes object to an IP address string.
+
+    This function handles both IPv4 and IPv6 addresses. For IPv4, the bytes are converted
+    into the standard dotted-decimal notation (e.g., '192.168.1.1'). For IPv6, the bytes
+    are converted into the standard hexadecimal colon-separated format (e.g., '2001:0db8::1').
+
+    Args:
+        ip_bytes (bytes): The IP address in its byte representation. It must be either
+                          4 bytes long (for IPv4) or 16 bytes long (for IPv6).
+
+    Returns:
+        str: The string representation of the IP address.
+
+    Raises:
+        ValueError: If the input is not a valid IP address length (neither 4 nor 16 bytes).
+    """
+    if len(ip_bytes) == 4:  # IPv4
+        return socket.inet_ntoa(ip_bytes)
+    elif len(ip_bytes) == 16:  # IPv6
+        return socket.inet_ntop(socket.AF_INET6, ip_bytes)
+    else:
+        raise ValueError("Invalid IP address length: Must be 4 bytes (IPv4) or 16 bytes (IPv6)")
 
 def sec_to_ns(seconds: float) -> int:
     """
@@ -223,6 +251,99 @@ def ns_to_sec(nanoseconds: int) -> float:
     """
     # Dividing nanoseconds by 1e+9 to convert to seconds
     return nanoseconds / 1e+9
+
+def block_ip(ip_addr: str) -> NoReturn:
+    """
+    Adds a rule to the IPTables to drop packets from the specified IP address.
+
+    This function executes an IPTables command that adds a rule to block incoming packets
+    from a given IP address by appending the rule to the INPUT chain. It logs the result
+    of the operation using the system journal.
+
+    Args:
+        ip_addr (str): The IP address to be blocked.
+
+    Raises:
+        subprocess.CalledProcessError: Raised if the IPTables command fails.
+    """
+    try:
+        # Check if the IP address is an IPv6 address by looking for the presence of colons
+        if ':' in ip_addr:
+            # IPv6 address detected: Use ip6tables to insert a rule at the top of the INPUT chain to drop packets from this IP
+            subprocess.run(["/run/current-system/sw/bin/ip6tables", "-I", "INPUT", "1", "-s", ip_addr, "-j", "DROP"], check=True)
+        else:
+            # IPv4 address detected: Use iptables to insert a rule at the top of the INPUT chain to drop packets from this IP
+            subprocess.run(["/run/current-system/sw/bin/iptables", "-I", "INPUT", "1", "-s", ip_addr, "-j", "DROP"], check=True)
+        journal.send(f"LDPI: Blocked IP: {ip_addr}")
+    except subprocess.CalledProcessError as e:
+        # Log an error message if the iptables/ip6tables command fails
+        journal.send(f"LDPI: Failed to block IP {ip_addr}: {e}")
+
+def unblock_ip(ip_addr: str) -> NoReturn:
+    """
+    Removes a rule from the IPTables to allow packets from the specified IP address.
+
+    This function executes an IPTables command that deletes a rule in the INPUT chain,
+    allowing packets from a previously blocked IP address. It logs the result of the operation
+    using the system journal.
+
+    Args:
+        ip_addr (str): The IP address to be unblocked.
+
+    Raises:
+        subprocess.CalledProcessError: Raised if the IPTables command fails.
+    """
+    try:
+        if ':' in ip_addr:  # Check if it's an IPv6 address
+            # Remove the rule from ip6tables for IPv6 addresses
+            subprocess.run(["/run/current-system/sw/bin/ip6tables", "-D", "INPUT", "-s", ip_addr, "-j", "DROP"], check=True)
+        else:
+            # Remove the rule from iptables for IPv4 addresses
+            subprocess.run(["/run/current-system/sw/bin/iptables", "-D", "INPUT", "-s", ip_addr, "-j", "DROP"], check=True)
+        # Log the successful unblock action
+        journal.send(f"LDPI: Unblocked IP: {ip_addr}")
+    except subprocess.CalledProcessError as e:
+        # Log the failure in case of an error while unblocking the IP
+        journal.send(f"LDPI: Failed to unblock IP {ip_addr}: {e}")
+
+def check_gateway() -> bool:
+    """
+    Checks network availability by testing connectivity to the default gateway.
+
+    This function uses the `netifaces` library to retrieve the system's default gateway.
+    It then attempts to establish a connection to the default gateway on port 80 (HTTP).
+    If the connection is successful, the network is considered available.
+    The result of the test is logged using the system journal.
+
+    Returns:
+        bool: True if the network is available through the gateway, False otherwise.
+
+    Raises:
+        Exception: Captures any exceptions related to network connectivity or socket creation.
+    """
+    try:
+        # Use netifaces to retrieve the system's gateway information
+        gateways = ni.gateways()
+
+        # Extract the default gateway for IPv4 (AF_INET).
+        default_gateway = gateways['default'][ni.AF_INET][0]
+
+        if default_gateway:
+            # If a default gateway is found, try creating a connection to it on port 80 (HTTP).
+            socket.create_connection((default_gateway, 80), timeout=2)
+
+            # Log the success message with the default gateway address.
+            journal.send(f"LDPI: Network is available through the gateway: {default_gateway}")
+            return True
+        else:
+            # If no default gateway is found, log a failure message.
+            journal.send("LDPI: No default gateway found.")
+            return False
+
+    except Exception as e:
+        # If an error occurs (such as a connection timeout or unreachable gateway),
+        journal.send(f"LDPI: Network is unavailable. Retrying in 5 seconds. Error: {e}")
+        return False
 
 
 class Dataset(ABC):

@@ -1,6 +1,7 @@
 import logging
 import threading
 import time
+import socket
 from typing import List, Optional, Tuple, Dict, NoReturn
 
 import dpkt
@@ -9,7 +10,10 @@ import pcap
 from tqdm import tqdm
 
 from options import SnifferOptions
-from utils import ModuleInterface, SnifferSubscriber, FlowKeyType, Color, get_flow_key, sec_to_ns
+from utils import ModuleInterface, SnifferSubscriber, FlowKeyType, Color, get_flow_key, sec_to_ns, check_gateway
+
+from systemd import journal
+import sys
 
 # pcap library: comes from pypcap https://github.com/pynetwork/pypcap (requires sudo apt-get install libpcap-dev)
 
@@ -65,7 +69,43 @@ class Sniffer(ModuleInterface):
     # @abstractmethod
     def sniff(self) -> NoReturn:
         """Core sniffing method that captures packets and processes them."""
-        self.local_ip = ni.ifaddresses(self.args.interface)[ni.AF_INET][0]['addr']
+        while True:
+            if check_gateway():
+                break
+            time.sleep(5)
+
+        interfaces_test = ni.interfaces()
+        journal.send(f"LDPI: Available network interfaces: {interfaces_test}")
+
+        try:
+            interface = self.args.interface
+
+            if interface not in interfaces_test:
+                journal.send(f"LDPI: The specified interface '{interface}' is not among the available interfaces: {interfaces_test}")
+                raise RuntimeError(f"Invalid interface: '{interface}' is not available")
+
+            # Check for IPv4 configuration
+            if ni.AF_INET in ni.ifaddresses(interface):
+                ip_info = ni.ifaddresses(interface)[ni.AF_INET]
+                if ip_info:
+                    self.local_ip = ip_info[0].get('addr')
+                    journal.send(f"LDPI: Interface: {interface}, IP Address: {self.local_ip}")
+                else:
+                    journal.send(f"LDPI: No IPv4 address found for interface '{interface}'")
+                    raise RuntimeError(f"No IPv4 address available for interface '{interface}'")
+            else:
+                journal.send(f"LDPI: No IPv4 configuration found for interface '{interface}'")
+                raise RuntimeError(f"No IPv4 configuration found for interface '{interface}'")
+
+        except KeyError as e:
+            journal.send(f"LDPI: KeyError occurred while fetching IP address for interface '{interface}': {e}")
+
+        except RuntimeError as e:
+            journal.send(f"LDPI: Runtime error: {e}")
+
+        except Exception as e:
+            journal.send(f"LDPI: Unexpected error occurred: {e}")
+
         sniffer = pcap.pcap(name=self.args.interface, promisc=False, immediate=True, timestamp_in_ns=True)
         sniffer.setfilter(f'not ether broadcast and src not {self.local_ip}')
         print(Color.BOLD + f'Sniffing {self.args.interface} started, ' + Color.ENDC)

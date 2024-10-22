@@ -9,8 +9,10 @@ import torch
 
 from ldpi.training.preprocessing import anonymize_packet, trim_or_pad_packet
 from options import LDPIOptions
-from utils import FlowKeyType, SnifferSubscriber, Color, flow_key_to_str
+from utils import FlowKeyType, SnifferSubscriber, Color, flow_key_to_str, bytes_to_ip_address, block_ip, unblock_ip
 
+from systemd import journal
+import netifaces as ni
 
 class TrainedModel:
     """
@@ -54,7 +56,8 @@ class TrainedModel:
         self.hundred_one_threshold: Optional[float] = None
 
         # Load trained model
-        self.store_models_path: str = f'ldpi/training/output/{self.args.model_name}/'
+        base_dir = os.path.dirname(__file__)
+        self.store_models_path = os.path.join(base_dir, 'training', 'output', self.args.model_name)
         self._init_model()
 
         self.chosen_threshold: float = self._initialize_threshold()
@@ -255,9 +258,26 @@ class LightDeepPacketInspection(SnifferSubscriber):
         # Process each key and corresponding anomaly detection result
         for key, is_anomaly in zip(keys, is_anomaly):
             if is_anomaly:
-                # If anomaly detected, add the source IP to the blacklist
+                # Convert the source IP from bytes to string
+                source_ip = bytes_to_ip_address(key[0])
+
+                # Get the gateway IP using netifaces
+                gateways = ni.gateways()
+                default_gateway = gateways['default'][ni.AF_INET][0] if 'default' in gateways and ni.AF_INET in gateways['default'] else None
+
+                # If the default gateway is found, compare with the source IP
+                if default_gateway and source_ip == default_gateway:
+                    journal.send(f"LDPI: Detected anomaly from the gateway {source_ip}, but will not block it.")
+                    continue  # Skip blocking the gateway IP
+
+                # If the source IP is not the gateway, proceed to block
                 self.black_list.add(key[0])
-                print(Color.FAIL + f'Anomaly detected in flow {flow_key_to_str(key)}, LDPI blacklisted (ignoring packets from): {key[0]}' + Color.ENDC)
+                block_ip(source_ip)
+                journal.send(
+                    f"LDPI: Anomaly detected in flow {flow_key_to_str(key)}, blacklisted IP: {source_ip}. " +
+                    f"Source IP: {source_ip}, Source Port: {key[1]}, " +
+                    f"Destination IP: {bytes_to_ip_address(key[2])}, Destination Port: {key[3]}"
+                )
             else:
                 print(Color.OKGREEN + f'No anomaly detected in flow {flow_key_to_str(key)}' + Color.ENDC)
 
