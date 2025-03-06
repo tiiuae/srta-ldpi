@@ -271,8 +271,8 @@ class LightDeepPacketInspection(SnifferSubscriber):
                     continue  # Skip blocking the gateway IP
 
                 # If the source IP is not the gateway, proceed to block
-                self.black_list.add(key[0])
-                block_ip(source_ip)
+                # self.black_list.add(key[0])
+                # block_ip(source_ip)
                 journal.send(
                     f"LDPI: Anomaly detected in flow {flow_key_to_str(key)}, blacklisted IP: {source_ip}. " +
                     f"Source IP: {source_ip}, Source Port: {key[1]}, " +
